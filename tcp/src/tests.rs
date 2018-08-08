@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -6,9 +5,11 @@ use std::sync::Arc;
 use jsonrpc::{MetaIoHandler, Value, Metadata};
 use jsonrpc::futures::{Future, future};
 
-use server_utils::tokio_io::io;
-use server_utils::tokio_core::net::TcpStream;
-use server_utils::tokio_core::reactor::{Core, Timeout};
+use server_utils::tokio::{
+	timer::Delay,
+	net::TcpStream,
+	self, io,
+};
 
 use parking_lot::Mutex;
 
@@ -46,11 +47,14 @@ fn doc_test_connect() {
 	let server = casual_server();
 	let _server = server.start(&addr).expect("Server must run with no issues");
 
-	let mut core = Core::new().expect("Tokio Core should be created with no errors");
-	let stream = TcpStream::connect(&addr, &core.handle());
-	let result = core.run(stream);
+	let stream = TcpStream::connect(&addr)
+		.and_then(move |_stream| {
+			// assert_eq!(stream.peer_addr().unwrap(), addr);
+			Ok(())
+		})
+		.map_err(|err| panic!("Server connection error: {:?}", err));
 
-	assert!(result.is_ok());
+	tokio::run(stream);
 }
 
 #[test]
@@ -61,39 +65,46 @@ fn disconnect() {
 	let dispatcher = server.dispatcher();
 	let _server = server.start(&addr).expect("Server must run with no issues");
 
-	{
-		let mut core = Core::new().expect("Tokio Core should be created with no errors");
-		let stream = TcpStream::connect(&addr, &core.handle())
-			.and_then(|stream| future::ok(stream))
-			.and_then(|stream| future::result(stream.shutdown(::std::net::Shutdown::Both)));
-		core.run(stream).expect("tcp/ip session should finalize with no errors in disconnect test");
-	}
+	let stream = TcpStream::connect(&addr)
+		.and_then(move |stream| {
+			assert_eq!(stream.peer_addr().unwrap(), addr);
+			stream.shutdown(::std::net::Shutdown::Both)
+		})
+		.map_err(|err| panic!("Error disconnecting: {:?}", err));
+
+	tokio::run(stream);
 
 	::std::thread::sleep(::std::time::Duration::from_millis(50));
 
 	assert_eq!(0, dispatcher.peer_count());
 }
 
-fn dummy_request(addr: &SocketAddr, data: &[u8]) -> Vec<u8> {
-	let mut core = Core::new().expect("Tokio Core should be created with no errors");
-	let mut buffer = vec![0u8; 1024];
+fn dummy_request(addr: &SocketAddr, data: Vec<u8>) -> Vec<u8> {
+	let in_buffer = vec![0u8; 1024];
+	let out_buffer = Arc::new(Mutex::new(vec![0u8; 1024]));
+	let out_buffer_move = out_buffer.clone();
 
-	let stream = TcpStream::connect(addr, &core.handle())
+	let stream = TcpStream::connect(addr)
 		.and_then(|stream| {
 			io::write_all(stream, data)
 		})
-	.and_then(|(stream, _)| {
-		io::read(stream, &mut buffer)
-	})
-	.and_then(|(_, read_buf, len)| {
-		future::ok(read_buf[0..len].to_vec())
-	});
-	let result = core.run(stream).expect("Core should run with no errors");
+		.and_then(move |(stream, _)| {
+			io::read_exact(stream, in_buffer)
+		})
+		.and_then(move |(_, read_buf)| {
+			let mut out = out_buffer_move.lock();
+			out.copy_from_slice(&read_buf);
+			Ok(())
+		})
+		.map_err(|err| panic!("Error connecting or closing connection: {:?}", err));;
 
-	result
+	tokio::run(stream);
+
+	let out = out_buffer.lock();
+	out.clone()
 }
 
-fn dummy_request_str(addr: &SocketAddr, data: &[u8]) -> String {
+fn dummy_request_str(addr: &SocketAddr, data: Vec<u8>) -> String {
 	String::from_utf8(dummy_request(addr, data)).expect("String should be utf-8")
 }
 
@@ -106,7 +117,7 @@ fn doc_test_handle() {
 
 	let result = dummy_request_str(
 		&addr,
-		b"{\"jsonrpc\": \"2.0\", \"method\": \"say_hello\", \"params\": [42, 23], \"id\": 1}\n",
+		b"{\"jsonrpc\": \"2.0\", \"method\": \"say_hello\", \"params\": [42, 23], \"id\": 1}\n"[..].to_owned(),
 		);
 
 	assert_eq!(
@@ -133,7 +144,7 @@ fn req_parallel() {
 				for _ in 0..100 {
 					let result = dummy_request_str(
 						&addr,
-						b"{\"jsonrpc\": \"2.0\", \"method\": \"say_hello\", \"params\": [42, 23], \"id\": 1}\n",
+						b"{\"jsonrpc\": \"2.0\", \"method\": \"say_hello\", \"params\": [42, 23], \"id\": 1}\n"[..].to_owned(),
 						);
 
 					assert_eq!(
@@ -201,7 +212,7 @@ fn peer_meta() {
 
 	let result = dummy_request_str(
 		&addr,
-		b"{\"jsonrpc\": \"2.0\", \"method\": \"say_hello\", \"params\": [42, 23], \"id\": 1}\n"
+		b"{\"jsonrpc\": \"2.0\", \"method\": \"say_hello\", \"params\": [42, 23], \"id\": 1}\n"[..].to_owned()
 		);
 
 	// contains random port, so just smoky comparing response length
@@ -226,6 +237,7 @@ impl MetaExtractor<SocketMetadata> for PeerListMetaExtractor {
 
 #[test]
 fn message() {
+	use std::time::{Instant, Duration};
 
 	// MASSIVE SETUP
 	::logger::init_log();
@@ -242,67 +254,70 @@ fn message() {
 
 	let _server = server.start(&addr).expect("Server must run with no issues");
 
-	let mut core = Core::new().expect("Tokio Core should be created with no errors");
-	let timeout = Timeout::new(::std::time::Duration::from_millis(100), &core.handle())
-		.expect("There should be a timeout produced in message test");
-	let mut buffer = vec![0u8; 1024];
-	let mut buffer2 = vec![0u8; 1024];
-	let executed_dispatch = RefCell::new(false);
-	let executed_request = RefCell::new(false);
+	let deadline = Instant::now() + Duration::from_millis(100);
+	let delay = Delay::new(deadline);
+
+	let buffer = vec![0u8; 1024];
+	let buffer2 = vec![0u8; 1024];
+	let executed_dispatch = Arc::new(Mutex::new(false));
+	let executed_request = Arc::new(Mutex::new(false));
+	let executed_dispatch_move = executed_dispatch.clone();
+	let executed_request_move = executed_request.clone();
 
 	// CLIENT RUN
-	let stream = TcpStream::connect(&addr, &core.handle())
+	let stream = TcpStream::connect(&addr)
 		.and_then(|stream| {
-			future::ok(stream).join(timeout)
+			future::ok(stream).join(delay.map_err(|err| panic!("{:?}", err)))
 		})
-	.and_then(|stream| {
-		let peer_addr = peer_list.lock()[0].clone();
-		dispatcher.push_message(
-			&peer_addr,
-			"ping".to_owned(),
-			).expect("Should be sent with no errors");
-		trace!(target: "tcp", "Dispatched message for {}", peer_addr);
-		future::ok(stream)
-	})
-	.and_then(|(stream, _)| {
-		io::read(stream, &mut buffer)
-	})
-	.and_then(|(stream, read_buf, len)| {
-		trace!(target: "tcp", "Read ping message");
-		let ping_signal = read_buf[0..len].to_vec();
+		.and_then(move |stream| {
+			let peer_addr = peer_list.lock()[0].clone();
+			dispatcher.push_message(
+				&peer_addr,
+				"ping".to_owned(),
+				).expect("Should be sent with no errors");
+			trace!(target: "tcp", "Dispatched message for {}", peer_addr);
+			future::ok(stream)
+		})
+		.and_then(move |(stream, _)| {
+			io::read_exact(stream, buffer)
+		})
+		.and_then(move |(stream, read_buf)| {
+			trace!(target: "tcp", "Read ping message");
+			let ping_signal = read_buf[..].to_vec();
 
-		assert_eq!(
-			"ping\n",
-			String::from_utf8(ping_signal).expect("String should be utf-8"),
-			"Sent request does not match received by the peer",
-			);
-		// ensure tat the above assert was actually triggered
-		*executed_dispatch.borrow_mut() = true;
+			assert_eq!(
+				"ping\n",
+				String::from_utf8(ping_signal).expect("String should be utf-8"),
+				"Sent request does not match received by the peer",
+				);
+			// ensure that the above assert was actually triggered
+			*executed_dispatch_move.lock() = true;
 
-		future::ok(stream)
-	})
-	.and_then(|stream| {
-		// make request AFTER message dispatches
-		let data = b"{\"jsonrpc\": \"2.0\", \"method\": \"say_hello\", \"params\": [42, 23], \"id\": 1}\n";
-		io::write_all(stream, &data[..])
-	})
-	.and_then(|(stream, _)| {
-		io::read(stream, &mut buffer2)
-	})
-	.and_then(|(_, read_buf, len)| {
-		trace!(target: "tcp", "Read response message");
-		let response_signal = read_buf[0..len].to_vec();
-		assert_eq!(
-			"{\"jsonrpc\":\"2.0\",\"result\":\"hello\",\"id\":1}\n",
-			String::from_utf8(response_signal).expect("String should be utf-8"),
-			"Response does not match the expected handling",
-			);
-		*executed_request.borrow_mut() = true;
+			future::ok(stream)
+		})
+		.and_then(|stream| {
+			// make request AFTER message dispatches
+			let data = b"{\"jsonrpc\": \"2.0\", \"method\": \"say_hello\", \"params\": [42, 23], \"id\": 1}\n";
+			io::write_all(stream, &data[..])
+		})
+		.and_then(|(stream, _)| {
+			io::read_exact(stream, buffer2)
+		})
+		.and_then(move |(_, read_buf)| {
+			trace!(target: "tcp", "Read response message");
+			let response_signal = read_buf[..].to_vec();
+			assert_eq!(
+				"{\"jsonrpc\":\"2.0\",\"result\":\"hello\",\"id\":1}\n",
+				String::from_utf8(response_signal).expect("String should be utf-8"),
+				"Response does not match the expected handling",
+				);
+			*executed_request_move.lock() = true;
 
-		future::ok(())
-	});
+			future::ok(())
+		})
+		.map_err(|err| panic!("Dispach message error: {:?}", err));
 
-	core.run(stream).expect("Should be the payload in message test");
-	assert!(*executed_dispatch.borrow_mut());
-	assert!(*executed_request.borrow_mut());
+	tokio::run(stream);
+	assert!(*executed_dispatch.lock());
+	assert!(*executed_request.lock());
 }
