@@ -13,9 +13,7 @@ repository = "https://github.com/paritytech/jsonrpc"
 globset = "0.4"
 log = "0.4"
 jsonrpc-core = { version = "8.0", path = "../core" }
-# tokio-core = { version = "0.1" }
 tokio = { version = "~0.1.7" }
-# tokio-io = { version = "0.1" }
 tokio-codec = { version = "0.1" }
 bytes = "0.4"
 
