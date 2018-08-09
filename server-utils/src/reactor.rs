@@ -9,6 +9,12 @@ use tokio::{
 
 use core::futures::{self, Future};
 
+/// Thread pool thread count.
+//
+// NOTE: It may be better to use `num_cpus` and dynamically choose pool size
+// instead.
+const THREAD_POOL_SIZE: usize = 4;
+
 /// Possibly uninitialized event loop executor.
 #[derive(Debug)]
 pub enum UninitializedExecutor {
@@ -108,7 +114,15 @@ impl RpcEventLoop {
 		}
 
 		let handle = tb.spawn(move || {
-			let runtime = tokio::runtime::Runtime::new();
+			let mut tp_builder = tokio::executor::thread_pool::Builder::new();
+			tp_builder
+				.pool_size(THREAD_POOL_SIZE)
+				.name_prefix("jsonrpc-eventloop-");
+
+			let runtime = tokio::runtime::Builder::new()
+				.threadpool_builder(tp_builder)
+				.build();
+
 			match runtime {
 				Ok(mut runtime) => {
 					tx.send(Ok(runtime.executor())).expect("Rx is blocking upper thread.");

@@ -142,7 +142,7 @@ impl<M: Metadata, S: Middleware<M> + 'static> ServerBuilder<M, S> {
 				Ok(())
 			});
 
-			tokio::spawn(future::lazy(move || writer));
+			tokio::spawn(writer);
 			Ok(())
 		});
 
