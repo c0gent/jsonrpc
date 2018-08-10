@@ -6,13 +6,9 @@ use jsonrpc::futures::{future, Future, Stream, Sink};
 use jsonrpc::futures::sync::{mpsc, oneshot};
 use jsonrpc::{FutureResult, Metadata, MetaIoHandler, Middleware, NoopMiddleware};
 use server_utils::{
-	tokio::{
-		runtime::TaskExecutor,
-		io::AsyncRead,
-		self,
-	},
 	tokio_codec::Framed,
-	reactor, session, codecs
+	tokio::{self, runtime::TaskExecutor},
+	reactor, session, codecs,
 };
 use parking_lot::Mutex;
 
@@ -121,106 +117,104 @@ impl<M: Metadata, S: Middleware<M>> ServerBuilder<M, S> {
 		let (start_signal, start_receiver) = oneshot::channel();
 		let (wait_signal, wait_receiver) = oneshot::channel();
 
-		use parity_tokio_ipc::Endpoint;
+		executor.spawn(future::lazy(move || {
+			use parity_tokio_ipc::Endpoint;
 
-		if cfg!(unix) {
-			// warn about existing file and remove it
-			if ::std::fs::remove_file(&endpoint_addr).is_ok() {
-				warn!("Removed existing file '{}'.", &endpoint_addr);
+			if cfg!(unix) {
+				// warn about existing file and remove it
+				if ::std::fs::remove_file(&endpoint_addr).is_ok() {
+					warn!("Removed existing file '{}'.", &endpoint_addr);
+				}
 			}
-		}
 
-		let listener = match Endpoint::new(endpoint_addr) {
-			Ok(l) => l,
-			Err(e) => {
-				start_signal.send(Err(e)).expect("Cannot fail since receiver never dropped before receiving");
-				return Err(e);
-			}
-		};
+			let listener = match Endpoint::new(endpoint_addr) {
+				Ok(l) => l,
+				Err(e) => {
+					start_signal.send(Err(e)).expect("Cannot fail since receiver never dropped before receiving");
+					return future::Either::A(future::ok(()));
+				}
+			};
 
-		let connections = listener.incoming();
-		let mut id = 0u64;
+			let connections = listener.incoming();
+			let mut id = 0u64;
 
-		let server = connections.for_each(move |(io_stream, remote_id)| {
-			id = id.wrapping_add(1);
-			let session_id = id;
-			let session_stats = session_stats.clone();
-			trace!(target: "ipc", "Accepted incoming IPC connection: {}", session_id);
-			session_stats.as_ref().map(|stats| stats.open_session(session_id));
+			let server = connections.for_each(move |(io_stream, remote_id)| {
+				id = id.wrapping_add(1);
+				let session_id = id;
+				let session_stats = session_stats.clone();
+				trace!(target: "ipc", "Accepted incoming IPC connection: {}", session_id);
+				session_stats.as_ref().map(|stats| stats.open_session(session_id));
 
-			let (sender, receiver) = mpsc::channel(16);
-			let meta = meta_extractor.extract(&RequestContext {
-				endpoint_addr: &remote_id,
-				session_id,
-				sender,
-			});
-			let service = Service::new(rpc_handler.clone(), meta);
-			let (writer, reader) = Framed::new(
-				io_stream,
-				codecs::StreamCodec::new(
-					incoming_separator.clone(),
-					outgoing_separator.clone(),
-				),
-			).split();
-			let responses = reader.and_then(move |req| {
-				service.call(req).then(move |response| match response {
-					Err(e) => {
-						warn!(target: "ipc", "Error while processing request: {:?}", e);
-						future::ok(None)
-					},
-					Ok(None) => {
-						future::ok(None)
-					},
-					Ok(Some(response_data)) => {
-						trace!(target: "ipc", "Sent response: {}", &response_data);
-						future::ok(Some(response_data))
-					}
+				let (sender, receiver) = mpsc::channel(16);
+				let meta = meta_extractor.extract(&RequestContext {
+					endpoint_addr: &remote_id,
+					session_id,
+					sender,
+				});
+				let service = Service::new(rpc_handler.clone(), meta);
+				let (writer, reader) = Framed::new(
+	                io_stream,
+	                codecs::StreamCodec::new(
+	                    incoming_separator.clone(),
+	                    outgoing_separator.clone(),
+	                ),
+	            ).split();
+				let responses = reader.and_then(move |req| {
+					service.call(req).then(move |response| match response {
+						Err(e) => {
+							warn!(target: "ipc", "Error while processing request: {:?}", e);
+							future::ok(None)
+						},
+						Ok(None) => {
+							future::ok(None)
+						},
+						Ok(Some(response_data)) => {
+							trace!(target: "ipc", "Sent response: {}", &response_data);
+							future::ok(Some(response_data))
+						}
+					})
 				})
-			})
-			.filter_map(|x| x)
-			// we use `select_with_weak` here, instead of `select`, to close the stream
-			// as soon as the ipc pipe is closed
-			.select_with_weak(receiver.map_err(|e| {
-				warn!(target: "ipc", "Notification error: {:?}", e);
-				std::io::ErrorKind::Other.into()
-			}));
+				.filter_map(|x| x)
+				// we use `select_with_weak` here, instead of `select`, to close the stream
+				// as soon as the ipc pipe is closed
+				.select_with_weak(receiver.map_err(|e| {
+					warn!(target: "ipc", "Notification error: {:?}", e);
+					std::io::ErrorKind::Other.into()
+				}));
 
-			let writer = writer.send_all(responses).then(move |_| {
-				trace!(target: "ipc", "Peer: service finished");
-				session_stats.as_ref().map(|stats| stats.close_session(session_id));
+				let writer = writer.send_all(responses).then(move |_| {
+					trace!(target: "ipc", "Peer: service finished");
+					session_stats.as_ref().map(|stats| stats.close_session(session_id));
+					Ok(())
+				});
+
+				tokio::spawn(writer);
+
 				Ok(())
 			});
+			start_signal.send(Ok(())).expect("Cannot fail since receiver never dropped before receiving");
 
-			tokio::spawn(writer);
-
-			Ok(())
-		});
-
-		start_signal.send(Ok(())).expect("Cannot fail since receiver never dropped before receiving");
-
-		let stop = stop_receiver.map_err(|_| std::io::ErrorKind::Interrupted.into());
-
-		let stoppable_server =  future::Either::B(
-			server.select(stop)
-				.map(|_| {
-					let _ = wait_signal.send(());
-					()
-				})
-				.map_err(|_| ())
-		);
-
-		executor.executor().spawn(stoppable_server);
+			let stop = stop_receiver.map_err(|_| std::io::ErrorKind::Interrupted.into());
+			future::Either::B(
+				server.select(stop)
+					.map(|_| {
+						let _ = wait_signal.send(());
+						()
+					})
+					.map_err(|_| ())
+			)
+		}));
 
 		let handle = InnerHandles {
-						executor: Some(executor),
-						stop: Some(stop_signal),
-						path: path.to_owned(),
+			executor: Some(executor),
+			stop: Some(stop_signal),
+			path: path.to_owned(),
 		};
 
 		match start_receiver.wait().expect("Message should always be sent") {
 			Ok(()) => Ok(Server {
-							handles: Arc::new(Mutex::new(handle)),
-							wait_handle: Some(wait_receiver),
+				handles: Arc::new(Mutex::new(handle)),
+				wait_handle: Some(wait_receiver),
 			}),
 			Err(e) => Err(e)
 		}
@@ -294,7 +288,8 @@ mod tests {
 
 	use std::thread;
 	use std::sync::Arc;
-	use std::time::{self, Instant, Duration};
+	use std::time;
+	use std::time::{Instant, Duration};
 	use super::{ServerBuilder, Server};
 	use jsonrpc::{MetaIoHandler, Value};
 	use jsonrpc::futures::{Future, future, Stream, Sink};
@@ -302,9 +297,10 @@ mod tests {
 	use self::tokio_uds::UnixStream;
 	use parking_lot::Mutex;
 	use server_utils::{
-		tokio::{self, io::AsyncRead, timer::Delay, prelude::*},
-		codecs,
+		tokio_codec::Decoder,
+		tokio::{self, timer::Delay}
 	};
+	use server_utils::codecs;
 	use meta::{MetaExtractor, RequestContext};
 
 	fn server_builder() -> ServerBuilder {
@@ -324,7 +320,9 @@ mod tests {
 	fn dummy_request_str(path: &str, data: &str) -> String {
 		let stream_future = UnixStream::connect(path);
 		let reply = stream_future.and_then(|stream| {
-			let stream= stream.framed(codecs::StreamCodec::stream_incoming());
+			// let stream = stream.framed();
+			let stream = codecs::StreamCodec::stream_incoming()
+				.framed(stream);
 			let reply = stream
 				.send(data.to_owned())
 				.and_then(move |stream| {
@@ -563,26 +561,25 @@ mod tests {
 			tx.send(true).expect("failed to report that the server has stopped");
 		});
 
-		let deadline = Instant::now() + Duration::from_millis(100);
-		let delay = Delay::new(deadline)
+		let delay = Delay::new(Instant::now() + Duration::from_millis(500))
 			.map(|_| false)
 			.map_err(|err| panic!("{:?}", err));
 
-		// let timeout = Timeout::new(time::Duration::from_millis(500), &core.handle())
-
-		// 	.expect("failed to setup a timer")
-		// 	.map(|_| false)
-		// 	.map_err(|_| ());
-
-		let result_fut = rx.map_err(|_| ())
+		let result_fut = rx
+			.map_err(|_| ())
 			.select(delay)
-			.and_then(|(result, _next_fut)| {
-				assert_eq!(result, true, "Wait timeout exceeded");
-				Ok(())
-			})
-			.map_err(|_| ());
+			.then(move |result| {
+				match result {
+					Ok((result, _)) => {
+						assert_eq!(result, true, "Wait timeout exceeded");
+						assert!(UnixStream::connect(path).wait().is_err(),
+							"Connection to the closed socket should fail");
+						Ok(())
+					},
+					Err(_) => Err(()),
+				}
+			});
 
 		tokio::run(result_fut);
-		assert!(UnixStream::connect(path).wait().is_err(), "Connection to the closed socket should fail");
 	}
 }
