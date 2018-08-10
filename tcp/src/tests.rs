@@ -1,14 +1,15 @@
-use std::net::SocketAddr;
+use std::net::{SocketAddr, Shutdown};
 use std::str::FromStr;
 use std::sync::Arc;
 
 use jsonrpc::{MetaIoHandler, Value, Metadata};
-use jsonrpc::futures::{Future, future};
+use jsonrpc::futures::{self, Future, future};
 
 use server_utils::tokio::{
 	timer::Delay,
 	net::TcpStream,
-	self, io,
+	io::{self},
+	self,
 };
 
 use parking_lot::Mutex;
@@ -49,7 +50,6 @@ fn doc_test_connect() {
 
 	let stream = TcpStream::connect(&addr)
 		.and_then(move |_stream| {
-			// assert_eq!(stream.peer_addr().unwrap(), addr);
 			Ok(())
 		})
 		.map_err(|err| panic!("Server connection error: {:?}", err));
@@ -80,28 +80,23 @@ fn disconnect() {
 }
 
 fn dummy_request(addr: &SocketAddr, data: Vec<u8>) -> Vec<u8> {
-	let in_buffer = vec![0u8; 1024];
-	let out_buffer = Arc::new(Mutex::new(vec![0u8; 1024]));
-	let out_buffer_move = out_buffer.clone();
+	let (ret_tx, ret_rx) = futures::sync::oneshot::channel();
 
 	let stream = TcpStream::connect(addr)
-		.and_then(|stream| {
+		.and_then(move |stream| {
 			io::write_all(stream, data)
 		})
-		.and_then(move |(stream, _)| {
-			io::read_exact(stream, in_buffer)
+		.and_then(|(stream, _data)| {
+			stream.shutdown(Shutdown::Write).unwrap();
+			io::read_to_end(stream, vec![]).wait()
 		})
-		.and_then(move |(_, read_buf)| {
-			let mut out = out_buffer_move.lock();
-			out.copy_from_slice(&read_buf);
-			Ok(())
+		.and_then(move |(_stream, read_buf)| {
+			ret_tx.send(read_buf).map_err(|err| panic!("Unable to send {:?}", err))
 		})
 		.map_err(|err| panic!("Error connecting or closing connection: {:?}", err));;
 
 	tokio::run(stream);
-
-	let out = out_buffer.lock();
-	out.clone()
+	ret_rx.wait().expect("Unable to receive result")
 }
 
 fn dummy_request_str(addr: &SocketAddr, data: Vec<u8>) -> String {
@@ -112,6 +107,7 @@ fn dummy_request_str(addr: &SocketAddr, data: Vec<u8>) -> String {
 fn doc_test_handle() {
 	::logger::init_log();
 	let addr: SocketAddr = "127.0.0.1:17780".parse().unwrap();
+
 	let server = casual_server();
 	let _server = server.start(&addr).expect("Server must run with no issues");
 
@@ -254,11 +250,10 @@ fn message() {
 
 	let _server = server.start(&addr).expect("Server must run with no issues");
 
-	let deadline = Instant::now() + Duration::from_millis(100);
+	let deadline = Instant::now() + Duration::from_millis(500);
 	let delay = Delay::new(deadline);
 
-	let buffer = vec![0u8; 1024];
-	let buffer2 = vec![0u8; 1024];
+	let message = "ping";
 	let executed_dispatch = Arc::new(Mutex::new(false));
 	let executed_request = Arc::new(Mutex::new(false));
 	let executed_dispatch_move = executed_dispatch.clone();
@@ -273,20 +268,21 @@ fn message() {
 			let peer_addr = peer_list.lock()[0].clone();
 			dispatcher.push_message(
 				&peer_addr,
-				"ping".to_owned(),
+				message.to_owned(),
 				).expect("Should be sent with no errors");
 			trace!(target: "tcp", "Dispatched message for {}", peer_addr);
 			future::ok(stream)
 		})
 		.and_then(move |(stream, _)| {
-			io::read_exact(stream, buffer)
+			// Read message plus newline appended by codec.
+			io::read_exact(stream, vec![0u8; message.len() + 1])
 		})
 		.and_then(move |(stream, read_buf)| {
 			trace!(target: "tcp", "Read ping message");
 			let ping_signal = read_buf[..].to_vec();
 
 			assert_eq!(
-				"ping\n",
+				format!("{}\n", message),
 				String::from_utf8(ping_signal).expect("String should be utf-8"),
 				"Sent request does not match received by the peer",
 				);
@@ -301,7 +297,8 @@ fn message() {
 			io::write_all(stream, &data[..])
 		})
 		.and_then(|(stream, _)| {
-			io::read_exact(stream, buffer2)
+			stream.shutdown(Shutdown::Write).unwrap();
+			io::read_to_end(stream, Vec::new())
 		})
 		.and_then(move |(_, read_buf)| {
 			trace!(target: "tcp", "Read response message");

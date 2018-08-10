@@ -13,7 +13,7 @@ use core::futures::{self, Future};
 //
 // NOTE: It may be better to use `num_cpus` and dynamically choose pool size
 // instead.
-const THREAD_POOL_SIZE: usize = 4;
+const THREAD_POOL_SIZE: usize = 1;
 
 /// Possibly uninitialized event loop executor.
 #[derive(Debug)]

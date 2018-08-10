@@ -78,84 +78,103 @@ impl<M: Metadata, S: Middleware<M> + 'static> ServerBuilder<M, S> {
 		let incoming_separator = self.incoming_separator;
 		let outgoing_separator = self.outgoing_separator;
 		let address = addr.to_owned();
+		let (tx, rx) = std::sync::mpsc::channel();
 		let (stop_tx, stop_rx) = oneshot::channel();
 
 		let executor = self.executor.initialize()?;
 
-		let listener = tokio::net::TcpListener::bind(&address)?;
-		let connections = listener.incoming();
+		executor.spawn(future::lazy(move || {
+			let start = move || {
+				let listener = tokio::net::TcpListener::bind(&address)?;
+				let connections = listener.incoming();
 
-		let server = connections.for_each(move |socket| {
-			let peer_addr = socket.peer_addr().expect("Unable to determine socket peer address");
-			trace!(target: "tcp", "Accepted incoming connection from {}", &peer_addr);
-			let (sender, receiver) = mpsc::channel(65536);
+				let server = connections.for_each(move |socket| {
+					let peer_addr = socket.peer_addr().expect("Unable to determine socket peer address");
+					trace!(target: "tcp", "Accepted incoming connection from {}", &peer_addr);
+					let (sender, receiver) = mpsc::channel(65536);
 
-			let context = RequestContext {
-				peer_addr: peer_addr,
-				sender: sender.clone(),
+					let context = RequestContext {
+						peer_addr: peer_addr,
+						sender: sender.clone(),
+					};
+
+					let meta = meta_extractor.extract(&context);
+					let service = Service::new(peer_addr, rpc_handler.clone(), meta);
+					let (writer, reader) = Framed::new(
+		                socket,
+		                codecs::StreamCodec::new(
+		                    incoming_separator.clone(),
+		                    outgoing_separator.clone(),
+		                ),
+		            ).split();
+
+					let responses = reader.and_then(
+						move |req| service.call(req).then(|response| match response {
+							Err(e) => {
+								warn!(target: "tcp", "Error while processing request: {:?}", e);
+								future::ok(String::new())
+							},
+							Ok(None) => {
+								trace!(target: "tcp", "JSON RPC request produced no response");
+								future::ok(String::new())
+							},
+							Ok(Some(response_data)) => {
+								trace!(target: "tcp", "Sent response: {}", &response_data);
+								future::ok(response_data)
+							}
+						})
+					);
+
+					let peer_message_queue = {
+						let mut channels = channels.lock();
+						channels.insert(peer_addr.clone(), sender.clone());
+
+						PeerMessageQueue::new(
+							responses,
+							receiver,
+							peer_addr.clone(),
+						)
+					};
+
+					let shared_channels = channels.clone();
+					let writer = writer.send_all(peer_message_queue).then(move |_| {
+						trace!(target: "tcp", "Peer {}: service finished", peer_addr);
+						let mut channels = shared_channels.lock();
+						channels.remove(&peer_addr);
+						Ok(())
+					});
+
+					tokio::spawn(writer);
+
+					Ok(())
+				});
+
+				Ok(server)
 			};
 
-			let meta = meta_extractor.extract(&context);
-			let service = Service::new(peer_addr, rpc_handler.clone(), meta);
+			let stop = stop_rx.map_err(|_| std::io::ErrorKind::Interrupted.into());
+			match start() {
+				Ok(server) => {
+					tx.send(Ok(())).expect("Rx is blocking parent thread.");
+					future::Either::A(server.select(stop)
+						.map(|_| ())
+						.map_err(|(e, _)| {
+							error!("Error while executing the server: {:?}", e);
+						}))
+				},
+				Err(e) => {
+					tx.send(Err(e)).expect("Rx is blocking parent thread.");
+					future::Either::B(stop
+						.map_err(|e| {
+							error!("Error while executing the server: {:?}", e);
+						}))
+				},
+			}
+		}));
 
-			let (writer, reader) = Framed::new(
-				socket,
-				codecs::StreamCodec::new(
-					incoming_separator.clone(),
-					outgoing_separator.clone(),
-				),
-			).split();
+		let res = rx.recv().expect("Response is always sent before tx is dropped.");
 
-			let responses = reader.and_then(
-				move |req| service.call(req).then(|response| match response {
-					Err(e) => {
-						warn!(target: "tcp", "Error while processing request: {:?}", e);
-						future::ok(String::new())
-					},
-					Ok(None) => {
-						trace!(target: "tcp", "JSON RPC request produced no response");
-						future::ok(String::new())
-					},
-					Ok(Some(response_data)) => {
-						trace!(target: "tcp", "Sent response: {}", &response_data);
-						future::ok(response_data)
-					}
-				})
-			);
-
-			let peer_message_queue = {
-				let mut channels = channels.lock();
-				channels.insert(peer_addr.clone(), sender.clone());
-
-				PeerMessageQueue::new(
-					responses,
-					receiver,
-					peer_addr.clone(),
-				)
-			};
-
-			let shared_channels = channels.clone();
-			let writer = writer.send_all(peer_message_queue).then(move |_| {
-				trace!(target: "tcp", "Peer {}: service finished", peer_addr);
-				let mut channels = shared_channels.lock();
-				channels.remove(&peer_addr);
-				Ok(())
-			});
-
-			tokio::spawn(writer);
-			Ok(())
-		});
-
-		let stop_rx = stop_rx.map_err(|_| std::io::ErrorKind::Interrupted.into());
-
-		let stoppable_server = server
-			.select(stop_rx)
-			.map(|_| ())
-			.map_err(|(e, _)| error!("Error while executing the server: {:?}", e));
-
-		executor.spawn(stoppable_server);
-
-		Ok(Server {
+		res.map(|_| Server {
 			executor: Some(executor),
 			stop: Some(stop_tx),
 		})
