@@ -1,6 +1,7 @@
 use std::net::{SocketAddr, Shutdown};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{Instant, Duration};
 
 use jsonrpc::{MetaIoHandler, Value, Metadata};
 use jsonrpc::futures::{self, Future, future};
@@ -233,8 +234,6 @@ impl MetaExtractor<SocketMetadata> for PeerListMetaExtractor {
 
 #[test]
 fn message() {
-	use std::time::{Instant, Duration};
-
 	// MASSIVE SETUP
 	::logger::init_log();
 	let addr: SocketAddr = "127.0.0.1:17790".parse().unwrap();
@@ -250,8 +249,8 @@ fn message() {
 
 	let _server = server.start(&addr).expect("Server must run with no issues");
 
-	let deadline = Instant::now() + Duration::from_millis(500);
-	let delay = Delay::new(deadline);
+	let delay = Delay::new(Instant::now() + Duration::from_millis(500))
+		.map_err(|err| panic!("{:?}", err));
 
 	let message = "ping";
 	let executed_dispatch = Arc::new(Mutex::new(false));
@@ -262,7 +261,7 @@ fn message() {
 	// CLIENT RUN
 	let stream = TcpStream::connect(&addr)
 		.and_then(|stream| {
-			future::ok(stream).join(delay.map_err(|err| panic!("{:?}", err)))
+			future::ok(stream).join(delay)
 		})
 		.and_then(move |stream| {
 			let peer_addr = peer_list.lock()[0].clone();
