@@ -1,10 +1,9 @@
 //! Basic Request/Response structures used internally.
 
-// use hyper::server;
-use http::{self, StatusCode};
+use http;
 
-pub use hyper::{Method, Body};
-pub use hyperx::header;
+pub use hyper::{self, Method, Body, StatusCode};
+pub use hyperx;
 
 /// Simple server response structure
 #[derive(Debug)]
@@ -12,7 +11,7 @@ pub struct Response {
 	/// Response code
 	pub code: StatusCode,
 	/// Response content type
-	pub content_type: header::ContentType,
+	pub content_type: hyperx::header::ContentType,
 	/// Response body
 	pub content: String,
 }
@@ -27,7 +26,7 @@ impl Response {
 	pub fn ok<T: Into<String>>(response: T) -> Self {
 		Response {
 			code: StatusCode::OK,
-			content_type: header::ContentType::json(),
+			content_type: hyperx::header::ContentType::json(),
 			content: response.into(),
 		}
 	}
@@ -36,7 +35,7 @@ impl Response {
 	pub fn internal_error() -> Self {
 		Response {
 			code: StatusCode::FORBIDDEN,
-			content_type: header::ContentType::plaintext(),
+			content_type: hyperx::header::ContentType::plaintext(),
 			content: "Provided Host header is not whitelisted.\n".to_owned(),
 		}
 	}
@@ -45,7 +44,7 @@ impl Response {
 	pub fn host_not_allowed() -> Self {
 		Response {
 			code: StatusCode::FORBIDDEN,
-			content_type: header::ContentType::plaintext(),
+			content_type: hyperx::header::ContentType::plaintext(),
 			content: "Provided Host header is not whitelisted.\n".to_owned(),
 		}
 	}
@@ -54,7 +53,7 @@ impl Response {
 	pub fn unsupported_content_type() -> Self {
 		Response {
 			code: StatusCode::UNSUPPORTED_MEDIA_TYPE,
-			content_type: header::ContentType::plaintext(),
+			content_type: hyperx::header::ContentType::plaintext(),
 			content: "Supplied content type is not allowed. Content-Type: application/json is required\n".to_owned(),
 		}
 	}
@@ -63,7 +62,7 @@ impl Response {
 	pub fn method_not_allowed() -> Self {
 		Response {
 			code: StatusCode::METHOD_NOT_ALLOWED,
-			content_type: header::ContentType::plaintext(),
+			content_type: hyperx::header::ContentType::plaintext(),
 			content: "Used HTTP Method is not allowed. POST or OPTIONS is required\n".to_owned(),
 		}
 	}
@@ -72,7 +71,7 @@ impl Response {
 	pub fn invalid_cors() -> Self {
 		Response {
 			code: StatusCode::FORBIDDEN,
-			content_type: header::ContentType::plaintext(),
+			content_type: hyperx::header::ContentType::plaintext(),
 			content: "Origin of the request is not whitelisted. CORS headers would not be sent and any side-effects were cancelled as well.\n".to_owned(),
 		}
 	}
@@ -81,7 +80,7 @@ impl Response {
 	pub fn bad_request<S: Into<String>>(msg: S) -> Self {
 		Response {
 			code: StatusCode::BAD_REQUEST,
-			content_type: header::ContentType::plaintext(),
+			content_type: hyperx::header::ContentType::plaintext(),
 			content: msg.into()
 		}
 	}
@@ -90,31 +89,31 @@ impl Response {
 	pub fn too_large<S: Into<String>>(msg: S) -> Self {
 		Response {
 			code: StatusCode::PAYLOAD_TOO_LARGE,
-			content_type: header::ContentType::plaintext(),
+			content_type: hyperx::header::ContentType::plaintext(),
 			content: msg.into()
 		}
 	}
 }
 
-// impl Into<http::Response<Body>> for Response {
-// 	fn into(self) -> http::Response<Body> {
-// 		http::Response::new()
+// impl Into<hyper::Response<Body>> for Response {
+// 	fn into(self) -> hyper::Response<Body> {
+// 		hyper::Response::new()
 // 			.with_status(self.code)
 // 			.with_header(self.content_type)
 // 			.with_body(self.content)
 // 	}
 // }
 
-impl From<Response> for http::Response<Body> {
-	fn from(res: Response) -> http::Response<Body> {
-		let mut headers = http::HeaderMap::with_capacity(1);
-		headers.append(res.content_type);
+impl From<Response> for hyper::Response<Body> {
+	fn from(res: Response) -> hyper::Response<Body> {
+		let mut headers = hyper::HeaderMap::with_capacity(1);
+		headers.append("content-type", res.content_type);
 		let parts = http::response::Parts {
 			status: res.code,
 			version: http::version::Version::HTTP_11,
 			headers,
 			extensions: http::Extensions::new(),
 		};
-		http::Response::from_parts(parts, res.content)
+		hyper::Response::from_parts(parts, res.content)
 	}
 }

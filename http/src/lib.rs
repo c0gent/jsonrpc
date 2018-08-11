@@ -67,14 +67,14 @@ pub enum RequestMiddlewareAction {
 		/// This allows for side effects to take place.
 		should_continue_on_invalid_cors: bool,
 		/// The request object returned
-		request: http::Request<Body>,
+		request: hyper::Request<Body>,
 	},
 	/// Intercept the request and respond differently.
 	Respond {
 		/// Should standard hosts validation be performed?
 		should_validate_hosts: bool,
 		/// a future for server response
-		response: Box<Future<Item=http::Response<Body>, Error=hyper::Error> + Send>,
+		response: Box<Future<Item=hyper::Response<Body>, Error=hyper::Error> + Send>,
 	}
 }
 
@@ -87,8 +87,8 @@ impl From<Response> for RequestMiddlewareAction {
 	}
 }
 
-impl From<http::Response<Body>> for RequestMiddlewareAction {
-	fn from(response: http::Response<Body>) -> Self {
+impl From<hyper::Response<Body>> for RequestMiddlewareAction {
+	fn from(response: hyper::Response<Body>) -> Self {
 		RequestMiddlewareAction::Respond {
 			should_validate_hosts: true,
 			response: Box::new(futures::future::ok(response)),
@@ -96,8 +96,8 @@ impl From<http::Response<Body>> for RequestMiddlewareAction {
 	}
 }
 
-impl From<http::Request<Body>> for RequestMiddlewareAction {
-	fn from(request: http::Request<Body>) -> Self {
+impl From<hyper::Request<Body>> for RequestMiddlewareAction {
+	fn from(request: hyper::Request<Body>) -> Self {
 		RequestMiddlewareAction::Proceed {
 			should_continue_on_invalid_cors: false,
 			request,
@@ -108,13 +108,13 @@ impl From<http::Request<Body>> for RequestMiddlewareAction {
 /// Allows to intercept request and handle it differently.
 pub trait RequestMiddleware: Send + Sync + 'static {
 	/// Takes a request and decides how to proceed with it.
-	fn on_request(&self, request: http::Request<hyper::Body>) -> RequestMiddlewareAction;
+	fn on_request(&self, request: hyper::Request<hyper::Body>) -> RequestMiddlewareAction;
 }
 
 impl<F> RequestMiddleware for F where
-	F: Fn(http::Request<Body>) -> RequestMiddlewareAction + Sync + Send + 'static,
+	F: Fn(hyper::Request<Body>) -> RequestMiddlewareAction + Sync + Send + 'static,
 {
-	fn on_request(&self, request: http::Request<hyper::Body>) -> RequestMiddlewareAction {
+	fn on_request(&self, request: hyper::Request<hyper::Body>) -> RequestMiddlewareAction {
 		(*self)(request)
 	}
 }
@@ -122,7 +122,7 @@ impl<F> RequestMiddleware for F where
 #[derive(Default)]
 struct NoopRequestMiddleware;
 impl RequestMiddleware for NoopRequestMiddleware {
-	fn on_request(&self, request: http::Request<Body>) -> RequestMiddlewareAction {
+	fn on_request(&self, request: hyper::Request<Body>) -> RequestMiddlewareAction {
 		RequestMiddlewareAction::Proceed {
 			should_continue_on_invalid_cors: false,
 			request,
@@ -133,14 +133,14 @@ impl RequestMiddleware for NoopRequestMiddleware {
 /// Extracts metadata from the HTTP request.
 pub trait MetaExtractor<M: jsonrpc::Metadata>: Sync + Send + 'static {
 	/// Read the metadata from the request
-	fn read_metadata(&self, _: &http::Request<Body>) -> M;
+	fn read_metadata(&self, _: &hyper::Request<Body>) -> M;
 }
 
 impl<M, F> MetaExtractor<M> for F where
 	M: jsonrpc::Metadata,
-	F: Fn(&http::Request<Body>) -> M + Sync + Send + 'static,
+	F: Fn(&hyper::Request<Body>) -> M + Sync + Send + 'static,
 {
-	fn read_metadata(&self, req: &http::Request<Body>) -> M {
+	fn read_metadata(&self, req: &hyper::Request<Body>) -> M {
 		(*self)(req)
 	}
 }
@@ -148,7 +148,7 @@ impl<M, F> MetaExtractor<M> for F where
 #[derive(Default)]
 struct NoopExtractor;
 impl<M: jsonrpc::Metadata + Default> MetaExtractor<M> for NoopExtractor {
-	fn read_metadata(&self, _: &http::Request<Body>) -> M {
+	fn read_metadata(&self, _: &hyper::Request<Body>) -> M {
 		M::default()
 	}
 }

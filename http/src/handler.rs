@@ -5,8 +5,7 @@ use std::sync::Arc;
 
 use hyper::{self, server, Body, Method};
 use hyper::header::HeaderMap;
-use hyperx::{mime, header};
-use http;
+use hyperx;
 use unicase::Ascii;
 
 use jsonrpc::{self as core, FutureResult, Metadata, Middleware, NoopMiddleware};
@@ -57,7 +56,7 @@ impl<M: Metadata, S: Middleware<M>> server::Service for ServerHandler<M, S> {
 	type Error = hyper::Error;
 	type Future = Handler<M, S>;
 
-	fn call(&mut self, request: http::Request<Self::ReqBody>) -> Self::Future {
+	fn call(&mut self, request: hyper::Request<Self::ReqBody>) -> Self::Future {
 		let is_host_allowed = utils::is_host_allowed(&request, &self.allowed_hosts);
 		let action = self.middleware.on_request(request);
 
@@ -100,11 +99,11 @@ impl<M: Metadata, S: Middleware<M>> server::Service for ServerHandler<M, S> {
 pub enum Handler<M: Metadata, S: Middleware<M>> {
 	Rpc(RpcHandler<M, S>),
 	Error(Option<Response>),
-	Middleware(Box<Future<Item=http::Response<Body>, Error=hyper::Error> + Send>),
+	Middleware(Box<Future<Item=hyper::Response<Body>, Error=hyper::Error> + Send>),
 }
 
 impl<M: Metadata, S: Middleware<M>> Future for Handler<M, S> {
-	type Item = http::Response<Body>;
+	type Item = hyper::Response<Body>;
 	type Error = hyper::Error;
 
 	fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
@@ -141,7 +140,7 @@ enum RpcHandlerState<M, F> where
 	F: Future<Item = Option<core::Response>, Error = ()>,
 {
 	ReadingHeaders {
-		request: http::Request<Body>,
+		request: hyper::Request<Body>,
 		cors_domains: CorsDomains,
 		continue_on_invalid_cors: bool,
 	},
@@ -181,14 +180,14 @@ pub struct RpcHandler<M: Metadata, S: Middleware<M>> {
 	jsonrpc_handler: Rpc<M, S>,
 	state: RpcHandlerState<M, S::Future>,
 	is_options: bool,
-	cors_header: cors::CorsHeader<header::AccessControlAllowOrigin>,
+	cors_header: cors::CorsHeader<hyperx::header::AccessControlAllowOrigin>,
 	cors_max_age: Option<u32>,
 	rest_api: RestApi,
 	max_request_body_size: usize,
 }
 
 impl<M: Metadata, S: Middleware<M>> Future for RpcHandler<M, S> {
-	type Item = http::Response<Body>;
+	type Item = hyper::Response<Body>;
 	type Error = hyper::Error;
 
 	fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
@@ -238,7 +237,7 @@ impl<M: Metadata, S: Middleware<M>> Future for RpcHandler<M, S> {
 		let (new_state, is_ready) = new_state.decompose();
 		match new_state {
 			RpcHandlerState::Writing(res) => {
-				let mut response: http::Response<Body> = res.into();
+				let mut response: hyper::Response<Body> = res.into();
 				let cors_header = mem::replace(&mut self.cors_header, cors::CorsHeader::Invalid);
 				Self::set_response_headers(
 					response.headers_mut(),
@@ -277,7 +276,7 @@ impl From<hyper::Error> for BodyError {
 impl<M: Metadata, S: Middleware<M>> RpcHandler<M, S> {
 	fn read_headers(
 		&self,
-		request: http::Request<Body>,
+		request: hyper::Request<Body>,
 		continue_on_invalid_cors: bool,
 	) -> RpcHandlerState<M, S::Future> {
 		if self.cors_header == cors::CorsHeader::Invalid && !continue_on_invalid_cors {
@@ -290,13 +289,13 @@ impl<M: Metadata, S: Middleware<M>> RpcHandler<M, S> {
 		match *request.method() {
 			// Validate the ContentType header
 			// to prevent Cross-Origin XHRs with text/plain
-			Method::POST if Self::is_json(request.headers().get::<header::ContentType>()) => {
+			Method::POST if Self::is_json(request.headers().get("content-type")) => {
 				let uri = if self.rest_api != RestApi::Disabled { Some(request.uri().clone()) } else { None };
 				RpcHandlerState::ReadingBody {
 					metadata,
 					request: Default::default(),
 					uri,
-					body: request.body(),
+					body: *request.body(),
 				}
 			},
 			Method::POST if self.rest_api == RestApi::Unsecure && request.uri().path().split('/').count() > 2 => {
@@ -407,45 +406,48 @@ impl<M: Metadata, S: Middleware<M>> RpcHandler<M, S> {
 	fn set_response_headers(
 		headers: &mut HeaderMap,
 		is_options: bool,
-		cors_header: Option<header::AccessControlAllowOrigin>,
+		cors_header: Option<hyperx::header::AccessControlAllowOrigin>,
 		cors_max_age: Option<u32>,
 	) {
 		if is_options {
-			headers.set(header::Allow(vec![
-				Method::Options,
-				Method::Post,
-			]));
-			headers.set(header::Accept(vec![
-				header::qitem(mime::APPLICATION_JSON)
+			let allow_header = hyper::header::ALLOW(vec![
+				Method::OPTIONS,
+				Method::POST,
+			]);
+			*headers.get_mut(hyper::header::ALLOW).unwrap();
+			headers.set(hyperx::header::Accept(vec![
+				hyperx::header::qitem(hyperx::mime::APPLICATION_JSON)
 			]));
 		}
 
 		if let Some(cors_domain) = cors_header {
-			headers.set(header::AccessControlAllowMethods(vec![
-				Method::Options,
-				Method::Post
+			headers.set(hyperx::header::AccessControlAllowMethods(vec![
+				Method::OPTIONS,
+				Method::POST,
 			]));
-			headers.set(header::AccessControlAllowHeaders(vec![
+			headers.set(hyperx::header::AccessControlAllowHeaders(vec![
 				Ascii::new("origin".to_owned()),
 				Ascii::new("content-type".to_owned()),
 				Ascii::new("accept".to_owned()),
 			]));
 			if let Some(cors_max_age) = cors_max_age {
-				headers.set(header::AccessControlMaxAge(cors_max_age));
+				headers.set(hyperx::header::AccessControlMaxAge(cors_max_age));
 			}
 			headers.set(cors_domain);
-			headers.set(header::Vary::Items(vec![
+			headers.set(hyperx::header::Vary::Items(vec![
 				Ascii::new("origin".to_owned())
 			]));
 		}
 	}
 
-	fn is_json(content_type: Option<&header::ContentType>) -> bool {
-		const APPLICATION_JSON_UTF_8: &str = "application/json; charset=utf-8";
+	/// Returns true if the `content_type` header indicates a valid JSON
+	/// message.
+	fn is_json(content_type: Option<&hyper::header::HeaderValue>) -> bool { const
+		APPLICATION_JSON_UTF_8: &str = "application/json; charset=utf-8";
 
 		match content_type {
-			Some(&header::ContentType(ref mime))
-				if *mime == mime::APPLICATION_JSON || *mime == APPLICATION_JSON_UTF_8 => true,
+			Some(&hyperx::header::ContentType(ref mime))
+				if *mime == hyperx::mime::APPLICATION_JSON || *mime == APPLICATION_JSON_UTF_8 => true,
 			_ => false
 		}
 	}
