@@ -3,10 +3,8 @@ use Rpc;
 use std::{fmt, mem, str};
 use std::sync::Arc;
 
-use hyper::{self, server, Body, Method};
-use hyper::header::HeaderMap;
-use hyperx;
-use unicase::Ascii;
+use hyper::{self, service::Service, Body, Method};
+use hyper::header::{self, HeaderMap, HeaderValue};
 
 use jsonrpc::{self as core, FutureResult, Metadata, Middleware, NoopMiddleware};
 use jsonrpc::futures::{Future, Poll, Async, Stream, future};
@@ -50,7 +48,7 @@ impl<M: Metadata, S: Middleware<M>> ServerHandler<M, S> {
 	}
 }
 
-impl<M: Metadata, S: Middleware<M>> server::Service for ServerHandler<M, S> {
+impl<M: Metadata, S: Middleware<M>> Service for ServerHandler<M, S> {
 	type ReqBody = Body;
 	type ResBody = Body;
 	type Error = hyper::Error;
@@ -99,7 +97,7 @@ impl<M: Metadata, S: Middleware<M>> server::Service for ServerHandler<M, S> {
 pub enum Handler<M: Metadata, S: Middleware<M>> {
 	Rpc(RpcHandler<M, S>),
 	Error(Option<Response>),
-	Middleware(Box<Future<Item=hyper::Response<Body>, Error=hyper::Error> + Send>),
+	Middleware(Box<Future<Item = hyper::Response<Body>, Error = hyper::Error> + Send>),
 }
 
 impl<M: Metadata, S: Middleware<M>> Future for Handler<M, S> {
@@ -180,7 +178,7 @@ pub struct RpcHandler<M: Metadata, S: Middleware<M>> {
 	jsonrpc_handler: Rpc<M, S>,
 	state: RpcHandlerState<M, S::Future>,
 	is_options: bool,
-	cors_header: cors::CorsHeader<hyperx::header::AccessControlAllowOrigin>,
+	cors_header: cors::CorsHeader<header::HeaderValue>,
 	cors_max_age: Option<u32>,
 	rest_api: RestApi,
 	max_request_body_size: usize,
@@ -286,7 +284,7 @@ impl<M: Metadata, S: Middleware<M>> RpcHandler<M, S> {
 		let metadata = self.jsonrpc_handler.extractor.read_metadata(&request);
 
 		// Proceed
-		match *request.method() {
+		match request.method().clone() {
 			// Validate the ContentType header
 			// to prevent Cross-Origin XHRs with text/plain
 			Method::POST if Self::is_json(request.headers().get("content-type")) => {
@@ -295,7 +293,7 @@ impl<M: Metadata, S: Middleware<M>> RpcHandler<M, S> {
 					metadata,
 					request: Default::default(),
 					uri,
-					body: *request.body(),
+					body: request.into_body(),
 				}
 			},
 			Method::POST if self.rest_api == RestApi::Unsecure && request.uri().path().split('/').count() > 2 => {
@@ -406,49 +404,78 @@ impl<M: Metadata, S: Middleware<M>> RpcHandler<M, S> {
 	fn set_response_headers(
 		headers: &mut HeaderMap,
 		is_options: bool,
-		cors_header: Option<hyperx::header::AccessControlAllowOrigin>,
+		// cors_header: Option<header::AccessControlAllowOrigin>,
+		cors_header: Option<HeaderValue>,
 		cors_max_age: Option<u32>,
 	) {
 		if is_options {
-			let allow_header = hyper::header::ALLOW(vec![
-				Method::OPTIONS,
-				Method::POST,
-			]);
-			*headers.get_mut(hyper::header::ALLOW).unwrap();
-			headers.set(hyperx::header::Accept(vec![
-				hyperx::header::qitem(hyperx::mime::APPLICATION_JSON)
-			]));
+			// headers.set(header::Allow(vec![
+			// 	Method::OPTIONS,
+			// 	Method::POST,
+			// ]));
+			headers.insert(header::ALLOW, Method::OPTIONS.as_str().parse().unwrap());
+
+			// headers.set(header::Accept(vec![
+			// 	header::qitem(hyper::mime::APPLICATION_JSON)
+			// ]));
+			headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+
+
 		}
 
 		if let Some(cors_domain) = cors_header {
-			headers.set(hyperx::header::AccessControlAllowMethods(vec![
-				Method::OPTIONS,
-				Method::POST,
-			]));
-			headers.set(hyperx::header::AccessControlAllowHeaders(vec![
-				Ascii::new("origin".to_owned()),
-				Ascii::new("content-type".to_owned()),
-				Ascii::new("accept".to_owned()),
-			]));
+			// headers.set(header::AccessControlAllowMethods(vec![
+			// 	Method::OPTIONS,
+			// 	Method::POST,
+			// ]));
+			headers.insert(header::ACCESS_CONTROL_ALLOW_METHODS, Method::OPTIONS.as_str().parse().unwrap());
+			headers.insert(header::ACCESS_CONTROL_ALLOW_METHODS, Method::POST.as_str().parse().unwrap());
+
+			// headers.set(header::AccessControlAllowHeaders(vec![
+			// 	Ascii::new("origin".to_owned()),
+			// 	Ascii::new("content-type".to_owned()),
+			// 	Ascii::new("accept".to_owned()),
+			// ]));
+			headers.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("origin"));
+			headers.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("content-type"));
+			headers.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("accept"));
+
 			if let Some(cors_max_age) = cors_max_age {
-				headers.set(hyperx::header::AccessControlMaxAge(cors_max_age));
+				// headers.set(header::AccessControlMaxAge(cors_max_age));
+				headers.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_str(&cors_max_age.to_string()).unwrap());
 			}
-			headers.set(cors_domain);
-			headers.set(hyperx::header::Vary::Items(vec![
-				Ascii::new("origin".to_owned())
-			]));
+
+			// headers.set(cors_domain);
+			headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, cors_domain);
+
+			// headers.set(header::Vary::Items(vec![
+			// 	Ascii::new("origin".to_owned())
+			// ]));
+			headers.insert(header::VARY, HeaderValue::from_static("origin"));
 		}
 	}
 
 	/// Returns true if the `content_type` header indicates a valid JSON
 	/// message.
-	fn is_json(content_type: Option<&hyper::header::HeaderValue>) -> bool { const
-		APPLICATION_JSON_UTF_8: &str = "application/json; charset=utf-8";
+	fn is_json(content_type: Option<&header::HeaderValue>) -> bool {
+		// const APPLICATION_JSON_UTF_8: &str = "application/json; charset=utf-8";
+
+		// match content_type {
+		// 	Some(&header::ContentType(ref mime))
+		// 		if *mime == hyper::mime::APPLICATION_JSON || *mime == APPLICATION_JSON_UTF_8 => true,
+		// 	_ => false
+		// }
 
 		match content_type {
-			Some(&hyperx::header::ContentType(ref mime))
-				if *mime == hyperx::mime::APPLICATION_JSON || *mime == APPLICATION_JSON_UTF_8 => true,
-			_ => false
+			Some(header_val) => {
+				match header_val.to_str() {
+					Ok(header_str) => {
+						header_str == "application/json" || header_str == "application/json; charset=utf-8"
+					},
+					Err(_) => false,
+				}
+			}
+			_ => false,
 		}
 	}
 }

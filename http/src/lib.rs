@@ -29,8 +29,8 @@ extern crate net2;
 
 pub extern crate jsonrpc_core;
 pub extern crate hyper;
-pub extern crate hyperx;
-pub extern crate http;
+// pub extern crate hyperx;
+// pub extern crate http;
 
 #[macro_use]
 extern crate log;
@@ -448,47 +448,95 @@ fn serve<M: jsonrpc::Metadata, S: jsonrpc::Middleware<M>>(
 			Ok((listener, local_addr))
 		};
 
-		match bind() {
+		let bind_result = match bind() {
 			Ok((listener, local_addr)) => {
 				// Send local address
 				local_addr_tx.send(Ok(local_addr)).expect(SENDER_PROOF);
 
-				let allowed_hosts = server_utils::hosts::update(allowed_hosts, &local_addr);
-
-				let mut http = server::conn::Http::new();
-				http.keep_alive(keep_alive);
-
-				let stream = listener.incoming()
-					.for_each(|socket| {
-						let service = ServerHandler::new(
-							jsonrpc_handler.clone(),
-							cors_domains.clone(),
-							cors_max_age,
-							allowed_hosts.clone(),
-							request_middleware.clone(),
-							rest_api,
-							max_request_body_size,
-						);
-						http.serve_connection(socket, service);
-						Ok(())
-					})
-					.map_err(|e| {
-						warn!("Incoming streams error, closing sever: {:?}", e);
-					});
-					// .select(shutdown_signal.map_err(|e| {
-					// 	debug!("Shutdown signaler dropped, closing server: {:?}", e);
-					// }))
-					// .map(|(_, fut)| ())
-					// .map_err(|_| ());
-
-				tokio::spawn(stream);
+				futures::future::ok((listener, local_addr))
 			},
 			Err(err) => {
 				// Send error
 				local_addr_tx.send(Err(err)).expect(SENDER_PROOF);
+
+				futures::future::err(())
 			}
-		}
-		Ok(())
+		};
+
+		bind_result.and_then(move |(listener, local_addr)| {
+			// 	// Send local address
+			// 	local_addr_tx.send(Ok(local_addr)).expect(SENDER_PROOF);
+
+			// 	let allowed_hosts = server_utils::hosts::update(allowed_hosts, &local_addr);
+
+			// 	let mut http = server::conn::Http::new();
+			// 	http.keep_alive(keep_alive);
+
+			// 	let stream = listener.incoming()
+			// 		.for_each(move |socket| {
+			// 			let service = ServerHandler::new(
+			// 				jsonrpc_handler.clone(),
+			// 				cors_domains.clone(),
+			// 				cors_max_age,
+			// 				allowed_hosts.clone(),
+			// 				request_middleware.clone(),
+			// 				rest_api,
+			// 				max_request_body_size,
+			// 			);
+			// 			http.serve_connection(socket, service)
+			// 		})
+			// 		.map_err(|e| {
+			// 			warn!("Incoming streams error, closing sever: {:?}", e);
+			// 		})
+			// 		.select(shutdown_signal.map_err(|e| {
+			// 			debug!("Shutdown signaler dropped, closing server: {:?}", e);
+			// 		}))
+			// 		.map(|_| ())
+			// 		.map_err(|_| ());
+
+			// 	tokio::spawn(stream);
+			// },
+			// Err(err) => {
+			// 	// Send error
+			// 	local_addr_tx.send(Err(err)).expect(SENDER_PROOF);
+			// }
+
+
+			let allowed_hosts = server_utils::hosts::update(allowed_hosts, &local_addr);
+
+			// let http = {
+			// 	let mut http = server::Http::new();
+			// 	http.keep_alive(keep_alive);
+			// 	http.sleep_on_errors(true);
+			// 	http
+			// };
+			let mut http = server::conn::Http::new();
+			http.keep_alive(keep_alive);
+
+			listener.incoming()
+				.for_each(move |socket| {
+					let service = ServerHandler::new(
+						jsonrpc_handler.clone(),
+						cors_domains.clone(),
+						cors_max_age,
+						allowed_hosts.clone(),
+						request_middleware.clone(),
+						rest_api,
+						max_request_body_size,
+					);
+					tokio::spawn(http.serve_connection(socket, service)
+						.map_err(|e| error!("Error serving connection: {:?}", e)));
+					Ok(())
+				})
+				.map_err(|e| {
+					warn!("Incoming streams error, closing sever: {:?}", e);
+				})
+				.select(shutdown_signal.map_err(|e| {
+					debug!("Shutdown signaller dropped, closing server: {:?}", e);
+				}))
+				.map(|_| ())
+				.map_err(|_| ())
+		})
 	}));
 }
 

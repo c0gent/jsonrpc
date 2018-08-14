@@ -11,8 +11,8 @@ documentation = "https://paritytech.github.io/jsonrpc/jsonrpc_http_server/index.
 
 [dependencies]
 hyper = "0.12"
-hyperx = "0.13"
-http = "0.1"
+# hyperx = "0.13"
+# http = "0.1"
 jsonrpc-core = { version = "9.0", path = "../core" }
 jsonrpc-server-utils = { version = "9.0", path = "../server-utils" }
 log = "0.4"

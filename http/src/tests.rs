@@ -86,7 +86,7 @@ fn request(server: Server, request: &str) -> Response {
 
 	let mut lines = response.lines();
 	let status = lines.next().unwrap().to_owned();
-	let headers =	read_block(&mut lines);
+	let headers = read_block(&mut lines);
 	let body = read_block(&mut lines);
 
 	Response {
@@ -411,7 +411,8 @@ fn should_add_cors_header_for_null_origin_when_all() {
 	// then
 	assert_eq!(response.status, "HTTP/1.1 200 OK".to_owned());
 	assert_eq!(response.body, method_not_found());
-	assert!(response.headers.contains("Access-Control-Allow-Origin: null"), "Headers missing in {}", response.headers);
+	assert!(response.headers.contains("access-control-allow-origin: null"),
+		"Headers missing in {}", response.headers);
 }
 
 #[test]
@@ -738,18 +739,18 @@ fn cors_invalid() -> String {
 }
 
 fn method_not_found() -> String {
- "4E\n{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32601,\"message\":\"Method not found\"},\"id\":1}\n".into()
+ "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32601,\"message\":\"Method not found\"},\"id\":1}\n".into()
 }
 
 fn invalid_request() -> String {
- "50\n{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"Invalid request\"},\"id\":null}\n".into()
+ "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"Invalid request\"},\"id\":null}\n".into()
 }
 fn world() -> String {
- "2A\n{\"jsonrpc\":\"2.0\",\"result\":\"world\",\"id\":1}\n".into()
+ "{\"jsonrpc\":\"2.0\",\"result\":\"world\",\"id\":1}\n".into()
 }
 fn world_5() -> String {
- "2D\n{\"jsonrpc\":\"2.0\",\"result\":\"world: 5\",\"id\":1}\n".into()
+ "{\"jsonrpc\":\"2.0\",\"result\":\"world: 5\",\"id\":1}\n".into()
 }
 fn world_batch() -> String {
- "2C\n[{\"jsonrpc\":\"2.0\",\"result\":\"world\",\"id\":1}]\n".into()
+ "[{\"jsonrpc\":\"2.0\",\"result\":\"world\",\"id\":1}]\n".into()
 }
