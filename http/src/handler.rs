@@ -178,7 +178,8 @@ pub struct RpcHandler<M: Metadata, S: Middleware<M>> {
 	jsonrpc_handler: Rpc<M, S>,
 	state: RpcHandlerState<M, S::Future>,
 	is_options: bool,
-	cors_header: cors::CorsHeader<header::HeaderValue>,
+	// cors_header: cors::CorsHeader<header::HeaderValue>,
+	cors_header: cors::CorsHeader<header::HeaderMap>,
 	cors_max_age: Option<u32>,
 	rest_api: RestApi,
 	max_request_body_size: usize,
@@ -193,6 +194,7 @@ impl<M: Metadata, S: Middleware<M>> Future for RpcHandler<M, S> {
 			RpcHandlerState::ReadingHeaders { request, cors_domains, continue_on_invalid_cors, } => {
 				// Read cors header
 				self.cors_header = utils::cors_header(&request, &cors_domains);
+				println!("###### self.CORS_HEADER: {:?}", self.cors_header);
 				self.is_options = *request.method() == Method::OPTIONS;
 				// Read other headers
 				RpcPollState::Ready(self.read_headers(request, continue_on_invalid_cors))
@@ -237,6 +239,7 @@ impl<M: Metadata, S: Middleware<M>> Future for RpcHandler<M, S> {
 			RpcHandlerState::Writing(res) => {
 				let mut response: hyper::Response<Body> = res.into();
 				let cors_header = mem::replace(&mut self.cors_header, cors::CorsHeader::Invalid);
+				println!("###### CORS_HEADER: {:?}", cors_header);
 				Self::set_response_headers(
 					response.headers_mut(),
 					self.is_options,
@@ -405,7 +408,8 @@ impl<M: Metadata, S: Middleware<M>> RpcHandler<M, S> {
 		headers: &mut HeaderMap,
 		is_options: bool,
 		// cors_header: Option<header::AccessControlAllowOrigin>,
-		cors_header: Option<HeaderValue>,
+		// cors_header: Option<HeaderValue>,
+		cors_header: Option<HeaderMap>,
 		cors_max_age: Option<u32>,
 	) {
 		if is_options {
@@ -413,12 +417,15 @@ impl<M: Metadata, S: Middleware<M>> RpcHandler<M, S> {
 			// 	Method::OPTIONS,
 			// 	Method::POST,
 			// ]));
-			headers.insert(header::ALLOW, Method::OPTIONS.as_str().parse().unwrap());
+			headers.append(header::ALLOW, Method::OPTIONS.as_str().parse().unwrap());
+			headers.append(header::ALLOW, Method::POST.as_str().parse().unwrap());
 
 			// headers.set(header::Accept(vec![
 			// 	header::qitem(hyper::mime::APPLICATION_JSON)
 			// ]));
-			headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+			headers.append(header::ACCEPT, HeaderValue::from_static("application/json"));
+
+			println!("##### set_response_headers: headers: {:?}", headers);
 
 
 		}
@@ -428,30 +435,30 @@ impl<M: Metadata, S: Middleware<M>> RpcHandler<M, S> {
 			// 	Method::OPTIONS,
 			// 	Method::POST,
 			// ]));
-			headers.insert(header::ACCESS_CONTROL_ALLOW_METHODS, Method::OPTIONS.as_str().parse().unwrap());
-			headers.insert(header::ACCESS_CONTROL_ALLOW_METHODS, Method::POST.as_str().parse().unwrap());
+			headers.append(header::ACCESS_CONTROL_ALLOW_METHODS, Method::OPTIONS.as_str().parse().unwrap());
+			headers.append(header::ACCESS_CONTROL_ALLOW_METHODS, Method::POST.as_str().parse().unwrap());
 
 			// headers.set(header::AccessControlAllowHeaders(vec![
 			// 	Ascii::new("origin".to_owned()),
 			// 	Ascii::new("content-type".to_owned()),
 			// 	Ascii::new("accept".to_owned()),
 			// ]));
-			headers.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("origin"));
-			headers.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("content-type"));
-			headers.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("accept"));
+			headers.append(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("origin"));
+			headers.append(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("content-type"));
+			headers.append(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("accept"));
 
 			if let Some(cors_max_age) = cors_max_age {
 				// headers.set(header::AccessControlMaxAge(cors_max_age));
-				headers.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_str(&cors_max_age.to_string()).unwrap());
+				headers.append(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_str(&cors_max_age.to_string()).unwrap());
 			}
 
 			// headers.set(cors_domain);
-			headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, cors_domain);
+			headers.extend(cors_domain);
 
 			// headers.set(header::Vary::Items(vec![
 			// 	Ascii::new("origin".to_owned())
 			// ]));
-			headers.insert(header::VARY, HeaderValue::from_static("origin"));
+			headers.append(header::VARY, HeaderValue::from_static("origin"));
 		}
 	}
 

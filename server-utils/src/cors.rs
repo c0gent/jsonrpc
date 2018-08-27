@@ -171,7 +171,10 @@ impl<T> Into<Option<T>> for CorsHeader<T> {
 /// Returns correct CORS header (if any) given list of allowed origins and current origin.
 pub fn get_cors_header(origin: Option<&str>, host: Option<&str>, allowed: &Option<Vec<AccessControlAllowOrigin>>) -> CorsHeader {
 	match origin {
-		None => CorsHeader::NotRequired,
+		None => {
+			println!("###### GET_CORS_HEADER: origin: None");
+			CorsHeader::NotRequired
+		},
 		Some(ref origin) => {
 			if let Some(host) = host {
 				// Request initiated from the same server.
